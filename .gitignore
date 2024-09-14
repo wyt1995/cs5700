@@ -30,3 +30,9 @@
 *.exe
 *.out
 *.app
+
+# Course files
+slides/
+*.pdf
+*.ppt
+*.pptx
