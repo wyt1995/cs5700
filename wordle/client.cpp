@@ -229,7 +229,7 @@ std::string receive_message(int sockfd, bool tls, SSL *ssl) {
         message.append(buffer, bytes_received);
 
         // no \n character appears inside the JSON data
-        ssize_t newline = message.find('\n');
+        std::string::size_type newline = message.find('\n');
         if (newline != std::string::npos) {
             return message.substr(0, newline);
         }
