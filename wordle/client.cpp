@@ -46,7 +46,18 @@ bool parse_argv(int argc, char* argv[],
     return true;
 }
 
-int connect_server(std::string& hostname, int port_number, bool tls) {
+void initialize_ssl() {
+    SSL_load_error_strings();
+    SSL_library_init();
+    OpenSSL_add_ssl_algorithms();
+}
+
+void clean_ssl() {
+    ERR_free_strings();
+    EVP_cleanup();
+}
+
+int connect_server(std::string& hostname, int port_number, bool tls, SSL_CTX **ctx, SSL **ssl) {
     int sockfd = -1, rc = -1;
     struct addrinfo hints, *addr_list, *ptr;
 
@@ -84,16 +95,42 @@ int connect_server(std::string& hostname, int port_number, bool tls) {
     if (!ptr) {
         return -1;
     }
+    // TLS encrypted connection
+    if (tls) {
+        const SSL_METHOD *method = TLS_client_method();
+        *ctx = SSL_CTX_new(method);
+        if (!*ctx) {
+            ERR_print_errors_fp(stderr);
+            close(sockfd);
+            return -1;
+        }
+        if (!SSL_CTX_set_default_verify_paths(*ctx)) {
+            ERR_print_errors_fp(stderr);
+            SSL_CTX_free(*ctx);
+            close(sockfd);
+            return -1;
+        }
+        SSL_CTX_set_verify(*ctx, SSL_VERIFY_PEER, NULL);
+        *ssl = SSL_new(*ctx);
+        SSL_set_fd(*ssl, sockfd);
+        if (SSL_connect(*ssl) <= 0) {
+            ERR_print_errors_fp(stderr);
+            SSL_free(*ssl);
+            SSL_CTX_free(*ctx);
+            close(sockfd);
+            return -1;
+        }
+    }
     return sockfd;
 }
 
-std::string play_game(int sockfd, const std::string& username, bool tls) {
+std::string play_game(int sockfd, const std::string& username, bool tls, SSL* ssl) {
     std::vector<std::string> words = read_from_file();
     std::set<char> nonexist;
     std::map<char, std::vector<int>> correct;
     std::map<char, std::vector<int>> wrong_positions;
 
-    std::string game_id = start_game(sockfd, username);
+    std::string game_id = start_game(sockfd, username, tls, ssl);
     bool game_over = false;
     int round = 0;
     std::string secret_flag;
@@ -109,10 +146,10 @@ std::string play_game(int sockfd, const std::string& username, bool tls) {
         guess_msg["id"] = game_id;
         guess_msg["word"] = guess;
         std::string sending = guess_msg.dump() + '\n';
-        send_message(sockfd, sending);
+        send_message(sockfd, sending, tls, ssl);
         round += 1;
 
-        std::string received = receive_message(sockfd);
+        std::string received = receive_message(sockfd, tls, ssl);
         json retry = json::parse(received);
         if (retry["type"] == "bye" && retry["id"] == game_id) {
             game_over = true;
@@ -136,7 +173,7 @@ std::string play_game(int sockfd, const std::string& username, bool tls) {
             std::cerr << retry["message"] << std::endl;
             exit(1);
         } else {
-            std::cerr << "unknown error" << std::endl;
+            std::cerr << "unknown error: " << received << std::endl;
             exit(1);
         }
     }
@@ -161,22 +198,30 @@ std::vector<std::string> read_from_file() {
     return word_list;
 }
 
-void send_message(int sockfd, const std::string& message) {
-    std::cout << message << std::endl;
+void send_message(int sockfd, const std::string& message, bool tls, SSL *ssl) {
     ssize_t bytes_sent;
-    if ((bytes_sent = send(sockfd, message.c_str(), message.length(), 0)) < 0) {
+    if (tls) {
+        bytes_sent = SSL_write(ssl, message.c_str(), message.length());
+    } else {
+        bytes_sent = send(sockfd, message.c_str(), message.length(), 0);
+    }
+    if (bytes_sent < 0) {
         std::cerr << "failed to send hello message" << std::endl;
         exit(1);
     }
 }
 
-std::string receive_message(int sockfd) {
+std::string receive_message(int sockfd, bool tls, SSL *ssl) {
     char buffer[2048];
     std::string message;
     ssize_t bytes_received;
 
     while (true) {
-        bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
+        if (tls) {
+            bytes_received = SSL_read(ssl, buffer, sizeof(buffer));
+        } else {
+            bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
+        }
         if (bytes_received <= 0) {
             std::cerr << "failed to receive message from server" << std::endl;
             exit(1);
@@ -186,22 +231,21 @@ std::string receive_message(int sockfd) {
         // no \n character appears inside the JSON data
         ssize_t newline = message.find('\n');
         if (newline != std::string::npos) {
-            std::cout << message << std::endl;
             return message.substr(0, newline);
         }
     }
 }
 
-std::string start_game(int sockfd, const std::string& username) {
+std::string start_game(int sockfd, const std::string& username, bool tls, SSL *ssl) {
     // send hello message to the server
     json hello_msg;
     hello_msg["type"] = "hello";
     hello_msg["northeastern_username"] = username;
     std::string sending = hello_msg.dump() + '\n';
-    send_message(sockfd, sending);
+    send_message(sockfd, sending, tls, ssl);
 
     // receive a start message from the server
-    std::string received = receive_message(sockfd);
+    std::string received = receive_message(sockfd, tls, ssl);
     json start_msg = json::parse(received);
     if (start_msg["type"] != "start") {
         std::cerr << "start message error: " << start_msg.dump() << std::endl;
@@ -298,18 +342,33 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
+    SSL_CTX* ctx = nullptr;
+    SSL* ssl = nullptr;
+    if (secure) {
+        initialize_ssl();
+    }
+
     // connect to the server
     int socketfd;
-    if ((socketfd = connect_server(hostname, port, secure)) < 0) {
+    if ((socketfd = connect_server(hostname, port, secure, &ctx, &ssl)) < 0) {
         std::cerr << "Failed to connect to " << hostname << std::endl;
+        if (secure) {
+            clean_ssl();
+        }
         exit(1);
     }
 
-    // play wordle game
-    std::string secret_flag = play_game(socketfd, username, secure);
+    // play wordle game and print the secret flag if successful
+    std::string secret_flag = play_game(socketfd, username, secure, ssl);
     std::cout << secret_flag << std::endl;
 
     // close connection
+    if (secure) {
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        clean_ssl();
+    }
     close(socketfd);
     return 0;
 }
