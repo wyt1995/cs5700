@@ -1,7 +1,12 @@
-#include "ftp_client.h"
 #include <iostream>
 #include <map>
+#include <regex>
 #include <string>
+#include <vector>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include "ftp_client.h"
 
 static bool verbose = false;
 
@@ -42,6 +47,25 @@ bool parse_command(int argc, char *argv[], bool& help, std::string& operation,
 }
 
 
+bool parse_url(const std::string& param1, const std::string& param2, FTP& ftp_url) {
+    std::regex url_pattern(R"(^(ftp):\/\/(?:([^:@]+)(?::([^@]+))?@)?([^:\/?#]+)(?::(\d+))?(\/[^?#]*)?$)");
+    std::smatch matches;
+
+    for (const std::string& param: {param1, param2}) {
+        if (std::regex_match(param, matches, url_pattern)) {
+            ftp_url.protocol = matches[1].str();
+            ftp_url.username = matches[2].length() ? matches[2].str() : DEFAULT_NAME;
+            ftp_url.password = matches[3].str();
+            ftp_url.host = matches[4].str();
+            ftp_url.port = matches[5].length() ? matches[5].str() : DEFAULT_PORT;
+            ftp_url.path = matches[6].length() ? matches[6].str() : "/";
+            return !ftp_url.host.empty();  // host name is required
+        }
+    }
+    return false;
+}
+
+
 void print_help() {
     std::cout << "Usage: ./4700ftp [-h] [--verbose] operation params [params ...]" << "\n\n";
     std::cout << "FTP client for listing, copying, moving, and deleting files and directories "
@@ -68,6 +92,37 @@ void print_help() {
 }
 
 
+int open_clientfd(const FTP& ftp) {
+    int sockfd = -1, rc = -1;
+    struct addrinfo hints, *addr_list, *ptr;
+
+    // get a list of potential server addresses
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if ((rc = getaddrinfo(ftp.host.c_str(), ftp.port.c_str(), &hints, &addr_list)) != 0) {
+        std::cerr << "getaddrinfo error " << gai_strerror(rc) << std::endl;
+        return -1;
+    }
+
+    // iterate over result list for one that we can successfully connect to
+    for (ptr = addr_list; ptr; ptr = ptr->ai_next) {
+        if ((sockfd = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol)) < 0) {
+            continue;
+        }
+        if (connect(sockfd, ptr->ai_addr, ptr->ai_addrlen) != -1) {
+            break;
+        }
+        // connection failed, try another
+        close(sockfd);
+    }
+
+    // clean up data structure
+    freeaddrinfo(addr_list);
+    return ptr ? sockfd : -1;
+}
+
+
 int main(int argc, char *argv[]) {
     std::string operation, param1, param2;
     bool help = false;
@@ -75,4 +130,18 @@ int main(int argc, char *argv[]) {
         print_help();
     }
 
+    FTP ftp_info;
+    if (!parse_url(param1, param2, ftp_info)) {
+        std::cerr << "URL format - ftp://[USER[:PASSWORD]@]HOST[:PORT]/PATH" << std::endl;
+        exit(1);
+    }
+
+    int sockfd;
+    if ((sockfd = open_clientfd(ftp_info)) < 0) {
+        std::cerr << "Failed to connect to " << ftp_info.host << std::endl;
+        exit(1);
+    }
+
+    close(sockfd);
+    return 0;
 }
