@@ -36,3 +36,8 @@ slides/
 *.pdf
 *.ppt
 *.pptx
+
+# IDE files
+.vscode/
+.idea/
+.DS_Store
