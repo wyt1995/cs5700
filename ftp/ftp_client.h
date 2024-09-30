@@ -4,10 +4,15 @@
 #define DEFAULT_NAME "anonymous"
 #define DEFAULT_PORT "21"
 
+#define CODE_STXFR 150
 #define CODE_CMPLT 200
 #define CODE_READY 220
 #define CODE_CLOSE 221
+#define CODE_DSUCC 226
+#define CODE_PSVMD 227
 #define CODE_LOGIN 230
+#define CODE_FSUCC 250
+#define CODE_CRDIR 257
 #define CODE_REQPW 331
 
 struct FTP {
@@ -48,10 +53,11 @@ void print_help();
 
 /**
  * Establish a connection with the FTP server.
- * @param ftp a struct containing the FTP server info.
+ * @param host domain name of the server.
+ * @param port the TCP port in decimal that the server is listening on.
  * @return the socket descriptor if success, -1 on error.
  */
-int open_clientfd(const FTP& ftp);
+int open_clientfd(const std::string& host, const std::string& port);
 
 /**
  * Send a message to the server; exit the program if failed.
@@ -87,5 +93,72 @@ bool pre_operation(int sockfd, const FTP& ftp);
  * Send a QUIT command to the FTP server.
  */
 void quit_connection(int sockfd);
+
+/**
+ * Parse the server response to the PASV command.
+ * @param msg the response message.
+ * @param ip output parameter for the IP address.
+ * @param port output parameter for the port number.
+ * @return true if okay, false on error.
+ */
+bool parse_pasv_response(const std::string& msg, std::string& ip, std::string& port);
+
+/**
+ * Open a data channel for uploading or downloading files.
+ * It sends a PASV command to the server, receives a response, and opens a new socket connection.
+ * @param control_sockfd the socket descriptor of the control channel.
+ * @return the socket descriptor of the data channel if success, -1 on any error.
+ */
+int open_data_channel(int control_sockfd);
+
+/**
+ * List all files under the given directory in the FTP server.
+ * @param control_sockfd the socket descriptor of the control channel.
+ * @param path the remote directory path.
+ * @return true if okay, false on error.
+ */
+bool list_directory(int control_sockfd, const std::string& path);
+
+/**
+ * Make a new directory under the given path.
+ * @param sockfd the socket descriptor of the control channel.
+ * @param dir the remote directory path.
+ * @return true if okay, false on error.
+ */
+bool make_directory(int sockfd, const std::string& dir);
+
+/**
+ * Remove the specified directory from the remote server.
+ * @param sockfd the socket descriptor of the control channel.
+ * @param dir the remote directory path.
+ * @return true if okay, false on error.
+ */
+bool remove_directory(int sockfd, const std::string& dir);
+
+/**
+ * Remove the given file from the remote server.
+ * @param sockfd the socket descriptor of the control channel.
+ * @param dir the remote directory path.
+ * @return true if okay, false on error.
+ */
+bool remove_file(int sockfd, const std::string& dir);
+
+/**
+ * Upload local file to the remote FTP server.
+ * @param control_sockfd the socket descriptor of the control channel.
+ * @param local_path path to the local file.
+ * @param remote_path path to the remote file.
+ * @return true if okay, false on error.
+ */
+bool upload_file(int control_sockfd, std::string& local_path, std::string& remote_path);
+
+/**
+ * Download file from the remote FTP server.
+ * @param control_sockfd the socket descriptor of the control channel.
+ * @param remote_path path to the remote file.
+ * @param local_path path to the local file.
+ * @return true if okay, false on error.
+ */
+bool download_file(int control_sockfd, std::string& remote_path, std::string& local_path);
 
 #endif

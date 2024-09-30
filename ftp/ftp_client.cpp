@@ -1,3 +1,4 @@
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <regex>
@@ -37,7 +38,7 @@ bool parse_command(int argc, char *argv[], bool& help, std::string& operation,
         return true;
     }
     if (arguments.size() < 2 || !valid_commands.contains(arguments[0])
-        || valid_commands.at(arguments[0]) != arguments.size()) {
+        || valid_commands.at(arguments[0]) != static_cast<int>(arguments.size())) {
         return false;
     }
     operation = arguments[0];
@@ -92,7 +93,7 @@ void print_help() {
 }
 
 
-int open_clientfd(const FTP& ftp) {
+int open_clientfd(const std::string& host, const std::string& port) {
     int sockfd = -1, rc = -1;
     struct addrinfo hints, *addr_list, *ptr;
 
@@ -100,7 +101,7 @@ int open_clientfd(const FTP& ftp) {
     memset(&hints, 0, sizeof(struct addrinfo));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    if ((rc = getaddrinfo(ftp.host.c_str(), ftp.port.c_str(), &hints, &addr_list)) != 0) {
+    if ((rc = getaddrinfo(host.c_str(), port.c_str(), &hints, &addr_list)) != 0) {
         std::cerr << "getaddrinfo error " << gai_strerror(rc) << std::endl;
         return -1;
     }
@@ -133,8 +134,9 @@ void send_message(int sockfd, const std::string& cmd, const std::string& param="
     const char* buf = msg.c_str();
 
     ssize_t total = 0, bytes_sent = 0;
-    while (total < msg.length()) {
-        if ((bytes_sent = send(sockfd, buf + total, msg.length() - total, 0)) == -1) {
+    auto msg_size = static_cast<ssize_t>(msg.length());
+    while (total < msg_size) {
+        if ((bytes_sent = send(sockfd, buf + total, msg_size - total, 0)) == -1) {
             std::cerr << "Failed to send command: " << msg;
             exit(1);
         }
@@ -144,7 +146,7 @@ void send_message(int sockfd, const std::string& cmd, const std::string& param="
 
 
 std::string read_response(int sockfd) {
-    char buf[2048];
+    char buf[1028];
     std::string message;
     ssize_t bytes_received;
 
@@ -231,11 +233,264 @@ bool pre_operation(int sockfd, const FTP& ftp) {
 }
 
 
+bool parse_pasv_response(const std::string& msg, std::string& ip, std::string& port) {
+    std::regex pasv_regex(R"(\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\))");
+    std::smatch matches;
+
+    if (std::regex_search(msg, matches, pasv_regex)) {
+        ip = matches[1].str() + "." + matches[2].str() + "." + matches[3].str() + "." + matches[4].str();
+        int p1 = std::stoi(matches[5].str());
+        int p2 = std::stoi(matches[6].str());
+        port = std::to_string((p1 << 8) + p2);
+        return true;
+    }
+    return false;
+}
+
+
+int open_data_channel(int control_sockfd) {
+    send_message(control_sockfd, "PASV");
+    std::string response = read_response(control_sockfd);
+    int code = response_code(response);
+    if (code != CODE_PSVMD) {
+        std::cerr << "Entering passive mode error: " << response << '\n';
+        return -1;
+    }
+
+    std::string ip;
+    std::string port;
+    if (!parse_pasv_response(response, ip, port)) {
+        std::cerr << "Failed to parse PASV response: " << response << '\n';
+        return -1;
+    }
+
+    int data_sockfd = open_clientfd(ip, port);
+    if (data_sockfd < 0) {
+        std::cerr << "Failed to open data channel\n";
+        return -1;
+    }
+    return data_sockfd;
+}
+
+
+bool list_directory(int control_sockfd, const std::string& path) {
+    // open data channel for file transfer
+    int data_sockfd;
+    if ((data_sockfd = open_data_channel(control_sockfd)) < 0) {
+        return false;
+    }
+
+    // send command through control channel
+    send_message(control_sockfd, "LIST", path);
+    std::string response = read_response(control_sockfd);
+    int code = response_code(response);
+    if (code != CODE_STXFR) {
+        std::cerr << "Failed to start ls command " << response << '\n';
+        close(data_sockfd);
+        return false;
+    }
+
+    // receive file listing, then close data channel
+    char buffer[4096];
+    std::string listing;
+    ssize_t bytes_received;
+    while ((bytes_received = recv(data_sockfd, buffer, sizeof(buffer) - 1, 0)) > 0) {
+        listing.append(buffer, bytes_received);
+    }
+    if (bytes_received < 0) {
+        std::cerr << "Data recv error\n";
+        close(data_sockfd);
+        return false;
+    }
+    close(data_sockfd);
+
+    // check control channel status
+    response = read_response(control_sockfd);
+    if ((code = response_code(response)) != CODE_DSUCC) {
+        std::cerr << "Failed to finish ls command " << response << '\n';
+        return false;
+    }
+
+    std::cout << listing;
+    return true;
+}
+
+
+bool make_directory(int sockfd, const std::string& dir) {
+    send_message(sockfd, "MKD", dir);
+    std::string response = read_response(sockfd);
+    int code = response_code(response);
+    if (code != CODE_CRDIR) {
+        std::cerr << "Failed to create directory " << dir << '\n';
+        return false;
+    }
+    if (verbose) {
+        std::cout << "Created directory " << dir << '\n';
+    }
+    return true;
+}
+
+
+bool remove_directory(int sockfd, const std::string& dir) {
+    send_message(sockfd, "RMD", dir);
+    std::string response = read_response(sockfd);
+    int code = response_code(response);
+    if (code != CODE_FSUCC) {
+        std::cerr << "Failed to remove directory " << dir << '\n';
+        return false;
+    }
+    if (verbose) {
+        std::cout << "Removed directory " << dir << '\n';
+    }
+    return true;
+}
+
+
+bool remove_file(int sockfd, const std::string& dir) {
+    send_message(sockfd, "DELE", dir);
+    std::string response = read_response(sockfd);
+    int code = response_code(response);
+    if (code != CODE_FSUCC) {
+        std::cerr << "Failed to remove file " << dir << '\n';
+        return false;
+    }
+    if (verbose) {
+        std::cout << "Removed file " << dir << '\n';
+    }
+    return true;
+}
+
+
+bool upload_file(int control_sockfd, std::string& local_path, std::string& remote_path) {
+    // handle remote file name
+    if (remote_path.back() == '/') {
+        std::string filename = local_path.substr(local_path.find_last_of('/') + 1);
+        remote_path += filename;
+    }
+
+    // open local file for reading
+    std::ifstream local_file(local_path, std::ios::binary);
+    if (!local_file) {
+        std::cerr << "Failed to open local file for reading " << local_path << '\n';
+        return false;
+    }
+
+    // open data channel
+    int data_sockfd;
+    if ((data_sockfd = open_data_channel(control_sockfd)) < 0) {
+        local_file.close();
+        return false;
+    }
+
+    // send STOR command through control channel
+    send_message(control_sockfd, "STOR", remote_path);
+    std::string response = read_response(control_sockfd);
+    int code = response_code(response);
+    if (code != CODE_STXFR) {
+        std::cerr << "Failed to start upload " << response << '\n';
+        close(data_sockfd);
+        local_file.close();
+        return false;
+    }
+
+    // send binary file through data channel
+    char buffer[4096];
+    ssize_t total, sent, remain;
+    while (local_file.read(buffer, sizeof(buffer)) || local_file.gcount() > 0) {
+        total = 0;
+        remain = local_file.gcount();
+        while (total < remain) {
+            if ((sent = send(data_sockfd, buffer + total, remain - total, 0)) == -1) {
+                std::cerr << "Error sending file: " << strerror(errno) << '\n';
+                close(data_sockfd);
+                local_file.close();
+                return false;
+            }
+            total += sent;
+        }
+    }
+
+    // clean up
+    local_file.close();
+    close(data_sockfd);
+
+    response = read_response(control_sockfd);
+    if ((code = response_code(response)) != CODE_DSUCC) {
+        std::cerr << "Failed to finish STOR command " << response << '\n';
+        return false;
+    }
+    if (verbose) {
+        std::cout << "Success: file uploaded as " << remote_path << '\n';
+    }
+    return true;
+}
+
+
+bool download_file(int control_sockfd, std::string& remote_path, std::string& local_path) {
+    // handle local file name
+    if (local_path.empty() || local_path.back() == '/') {
+        std::string filename = remote_path.substr(remote_path.find_last_of('/') + 1);
+        local_path += filename;
+    }
+
+    // open local file for writing
+    std::ofstream outfile(local_path, std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Failed to open local file for writing " << local_path << '\n';
+        return false;
+    }
+
+    // open data channel
+    int data_sockfd;
+    if ((data_sockfd = open_data_channel(control_sockfd)) < 0) {
+        outfile.close();
+        return false;
+    }
+
+    // send RETR command through control channel
+    send_message(control_sockfd, "RETR", remote_path);
+    std::string response = read_response(control_sockfd);
+    int code = response_code(response);
+    if (code != CODE_STXFR) {
+        std::cerr << "Failed to start download " << response << '\n';
+        close(data_sockfd);
+        outfile.close();
+        return false;
+    }
+
+    // receive file data through data channel
+    char buffer[4096];
+    ssize_t bytes_received;
+    while ((bytes_received = recv(data_sockfd, buffer, sizeof(buffer), 0)) > 0) {
+        outfile.write(buffer, bytes_received);
+    }
+    if (bytes_received < 0) {
+        std::cerr << "Error receiving file: " << strerror(errno) << '\n';
+        close(data_sockfd);
+        outfile.close();
+        return false;
+    }
+
+    // clean up
+    outfile.close();
+    close(data_sockfd);
+    response = read_response(control_sockfd);
+    if ((code = response_code(response)) != CODE_DSUCC) {
+        std::cerr << "Failed to finish RETR command " << response << '\n';
+        return false;
+    }
+    if (verbose) {
+        std::cout << "Success: file downloaded as " << local_path << '\n';
+    }
+    return true;
+}
+
+
 void quit_connection(int sockfd) {
     send_message(sockfd, "QUIT");
     std::string response = read_response(sockfd);
-    int code;
-    if ((code = response_code(response)) != CODE_CLOSE) {
+    int code = response_code(response);
+    if (code != CODE_CLOSE) {
         std::cerr << "Quit error" << response << '\n';
         close(sockfd);
         exit(1);
@@ -257,7 +512,7 @@ int main(int argc, char *argv[]) {
     }
 
     int sockfd;
-    if ((sockfd = open_clientfd(ftp_info)) < 0) {
+    if ((sockfd = open_clientfd(ftp_info.host, ftp_info.port)) < 0) {
         std::cerr << "Failed to connect to " << ftp_info.host << std::endl;
         exit(1);
     }
@@ -266,6 +521,38 @@ int main(int argc, char *argv[]) {
         std::cerr << "Connection error." << std::endl;
         close(sockfd);
         exit(1);
+    }
+
+    bool success = false;
+    if (operation == "ls") {
+        success = list_directory(sockfd, ftp_info.path);
+    } else if (operation == "mkdir") {
+        success = make_directory(sockfd, ftp_info.path);
+    } else if (operation == "rmdir") {
+        success = remove_directory(sockfd, ftp_info.path);
+    } else if (operation == "rm") {
+        success = remove_file(sockfd, ftp_info.path);
+    } else {
+        bool is_download = param1.find("ftp://") == 0;
+        if (is_download) {
+            success = download_file(sockfd, ftp_info.path, param2);
+        } else {
+            success = upload_file(sockfd, param1, ftp_info.path);
+        }
+
+        // mv command remove file from source
+        if (operation == "mv" && success) {
+            if (is_download) {
+                success = remove_file(sockfd, ftp_info.path);
+            } else {
+                success = std::remove(param1.c_str());
+            }
+        }
+    }
+
+    if (!success) {
+        close(sockfd);
+        return 0;
     }
 
     quit_connection(sockfd);
