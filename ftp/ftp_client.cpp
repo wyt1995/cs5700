@@ -123,6 +123,126 @@ int open_clientfd(const FTP& ftp) {
 }
 
 
+void send_message(int sockfd, const std::string& cmd, const std::string& param="") {
+    std::string msg;
+    if (param.empty()) {
+        msg = cmd + "\r\n";
+    } else {
+        msg = cmd + " " + param + "\r\n";
+    }
+    const char* buf = msg.c_str();
+
+    ssize_t total = 0, bytes_sent = 0;
+    while (total < msg.length()) {
+        if ((bytes_sent = send(sockfd, buf + total, msg.length() - total, 0)) == -1) {
+            std::cerr << "Failed to send command: " << msg;
+            exit(1);
+        }
+        total += bytes_sent;
+    }
+}
+
+
+std::string read_response(int sockfd) {
+    char buf[2048];
+    std::string message;
+    ssize_t bytes_received;
+
+    while (true) {
+        if ((bytes_received = recv(sockfd, buf, sizeof(buf), 0)) <= 0) {
+            std::cerr << "Failed to read response from server" << std::endl;
+            exit(1);
+        }
+        message.append(buf, bytes_received);
+
+        std::string::size_type endline = message.find("\r\n");
+        if (endline != std::string::npos) {
+            return message.substr(0, endline);
+        }
+    }
+}
+
+
+int response_code(std::string& response) {
+    if (verbose) {
+        std::cout << response << '\n';
+    }
+    if (response.length() < 3) {
+        return -1;
+    }
+    return std::stoi(response.substr(0, 3));
+}
+
+
+bool pre_operation(int sockfd, const FTP& ftp) {
+    std::string response;
+    int code;
+
+    // read hello message from the FTP server
+    response = read_response(sockfd);
+    if ((code = response_code(response)) != CODE_READY) {
+        std::cerr << "Unexpected welcome message: " << response << '\n';
+        return false;
+    }
+
+    // send username and password
+    send_message(sockfd, "USER", ftp.username);
+    response = read_response(sockfd);
+    if ((code = response_code(response)) == CODE_LOGIN) {
+        // user logged in, proceed with no further action
+        ;
+    } else if (code == CODE_REQPW) {
+        send_message(sockfd, "PASS", ftp.password);
+        response = read_response(sockfd);
+        if ((code = response_code(response)) != CODE_LOGIN) {
+            std::cerr << "Password error: " << response << '\n';
+            return false;
+        }
+    } else {
+        std::cerr << "Username error: " << response << '\n';
+        return false;
+    }
+
+    // set the connection to 8-bit binary data mode
+    send_message(sockfd, "TYPE", "I");
+    response = read_response(sockfd);
+    if ((code = response_code(response)) != CODE_CMPLT) {
+        std::cerr << "Type command error: " << response << '\n';
+        return false;
+    }
+
+    // set the connection to stream mode
+    send_message(sockfd, "MODE", "S");
+    response = read_response(sockfd);
+    if ((code = response_code(response)) != CODE_CMPLT) {
+        std::cerr << "Mode command error: " << response << '\n';
+        return false;
+    }
+
+    send_message(sockfd, "STRU", "F");
+    response = read_response(sockfd);
+    if ((code = response_code(response)) != CODE_CMPLT) {
+        std::cerr << "Structure command error: " << response << '\n';
+        return false;
+    }
+
+    // all operations succeeded
+    return true;
+}
+
+
+void quit_connection(int sockfd) {
+    send_message(sockfd, "QUIT");
+    std::string response = read_response(sockfd);
+    int code;
+    if ((code = response_code(response)) != CODE_CLOSE) {
+        std::cerr << "Quit error" << response << '\n';
+        close(sockfd);
+        exit(1);
+    }
+}
+
+
 int main(int argc, char *argv[]) {
     std::string operation, param1, param2;
     bool help = false;
@@ -142,6 +262,13 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
+    if (!pre_operation(sockfd, ftp_info)) {
+        std::cerr << "Connection error." << std::endl;
+        close(sockfd);
+        exit(1);
+    }
+
+    quit_connection(sockfd);
     close(sockfd);
     return 0;
 }

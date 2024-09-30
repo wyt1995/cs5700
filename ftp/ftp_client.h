@@ -4,6 +4,12 @@
 #define DEFAULT_NAME "anonymous"
 #define DEFAULT_PORT "21"
 
+#define CODE_CMPLT 200
+#define CODE_READY 220
+#define CODE_CLOSE 221
+#define CODE_LOGIN 230
+#define CODE_REQPW 331
+
 struct FTP {
     std::string protocol;
     std::string username;
@@ -46,5 +52,40 @@ void print_help();
  * @return the socket descriptor if success, -1 on error.
  */
 int open_clientfd(const FTP& ftp);
+
+/**
+ * Send a message to the server; exit the program if failed.
+ * @param sockfd the socket descriptor used by I/O system calls.
+ * @param cmd the command to be sent.
+ * @param param an option parameter, default to be an empty string.
+ */
+void send_message(int sockfd, const std::string& cmd, const std::string& param);
+
+/**
+ * Receive a message from server. The message must ends with '\r\n'.
+ * @param sockfd the socket descriptor used by I/O system calls.
+ * @return the string message received by the client.
+ */
+std::string read_response(int sockfd);
+
+/**
+ * Parse server response message. If verbose mode is set, print out the response.
+ * @param response the string response received by the client.
+ * @return the FTP server response code.
+ */
+int response_code(std::string& response);
+
+/**
+ * Send USER, PASS, TYPE, MODE, STRU commands to the FTP server before any file operation.
+ * @param sockfd the socket descriptor used by I/O system calls.
+ * @param ftp a struct containing the FTP server info.
+ * @return true if all commands are successful, false on error.
+ */
+bool pre_operation(int sockfd, const FTP& ftp);
+
+/**
+ * Send a QUIT command to the FTP server.
+ */
+void quit_connection(int sockfd);
 
 #endif
