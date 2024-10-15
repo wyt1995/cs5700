@@ -1,16 +1,18 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
+from Trie import Trie
 
 class Router:
-
-    relations = {}
-    sockets = {}
-    ports = {}
-
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
         self.asn = asn
+        self.relations = {}
+        self.sockets = {}
+        self.ports = {}
+        self.routing_table = Trie()
+        self.history = []
+
         for relationship in connections:
             port, neighbor, relation = relationship.split("-")
 
@@ -30,18 +32,116 @@ class Router:
 
     def run(self):
         while True:
+            # Unix select system call; return a list of socket objects
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
-            for conn in socks:
-                k, addr = conn.recvfrom(65535)
+
+            for sock in socks:
+                k, addr = sock.recvfrom(65535)
                 srcif = None
-                for sock in self.sockets:
-                    if self.sockets[sock] == conn:
-                        srcif = sock
+                for ip in self.sockets:
+                    if self.sockets[ip] == sock:
+                        srcif = ip
                         break
                 msg = k.decode('utf-8')
-
                 print("Received message '%s' from %s" % (msg, srcif))
-        return
+
+                message = json.loads(msg)
+                msg_type = message["type"]
+                match msg_type:
+                    case "update":
+                        self.route_update(message)
+                    case "withdraw":
+                        self.route_withdraw(message)
+                    case "data":
+                        self.deliver_data(message)
+                    case "dump":
+                        self.dump_table(message)
+
+
+    def route_update(self, msg):
+        """
+        Handles update message from a neighbor router, and updates the forwarding table.
+        :param msg: a JSON object.
+        """
+        # save a copy of the announcement
+        self.history.append(msg)
+
+        # create new route entry, update forwarding table
+        new_route = {
+            "network": msg["msg"]["network"],
+            "netmask": msg["msg"]["netmask"],
+            "peer": msg["src"],
+            "ASPath": msg["msg"]["ASPath"][:],
+            "localpref": int(msg["msg"]["localpref"]),
+            "origin": msg["msg"]["origin"],
+            "selfOrigin": msg["msg"]["selfOrigin"],
+        }
+        self.routing_table.insert(new_route)
+        self.propagate_update(msg)
+
+    def propagate_update(self, msg):
+        peer_ip = msg["src"]
+        relation = self.relations[peer_ip]
+
+        # Update received from a customer: send updates to all other neighbors
+        if relation == "cust":
+            forward = [ip for ip in self.relations if ip != peer_ip]
+        # Update received from a peer or a provider: only send updates to your customers
+        elif relation == "peer" or relation == "prov":
+            forward = [ip for ip, rel in self.relations.items() if rel == "cust"]
+        else:
+            forward = []
+
+        for dest in forward:
+            as_path = [self.asn] + msg["msg"]["ASPath"]
+            sending = {
+                "src": self.our_addr(dest),
+                "dst": dest,
+                "type": "update",
+                "msg": {
+                    "network": msg["msg"]["network"],
+                    "netmask": msg["msg"]["netmask"],
+                    "ASPath": as_path,
+                }
+            }
+            self.send(dest, json.dumps(sending))
+
+
+    def route_withdraw(self, msg):
+        pass
+
+
+    def deliver_data(self, msg):
+        dest_ip = msg["dst"]
+        route = self.routing_table.search(dest_ip)
+        if not route:
+            sending = {
+                "src": self.our_addr(dest_ip),
+                "dst": msg["src"],
+                "type": "no route",
+                "msg": {}
+            }
+            self.send(msg["src"], json.dumps(sending))
+        else:
+            sending = {
+                "src": self.our_addr(dest_ip),
+                "dst": dest_ip,
+                "type": "data",
+                "msg": msg["msg"]
+            }
+            self.send(route["peer"], json.dumps(sending))
+
+
+    def dump_table(self, msg):
+        curr_table = self.routing_table.dump()
+        sending = {
+            "src": self.our_addr(msg["dst"]),
+            "dst": msg["src"],
+            "type": "table",
+            "msg": curr_table,
+        }
+        self.send(msg["src"], json.dumps(sending))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='route packets')
