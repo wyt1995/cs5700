@@ -40,4 +40,5 @@ slides/
 # IDE files
 .vscode/
 .idea/
+__pycache__/
 .DS_Store
