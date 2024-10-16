@@ -55,6 +55,8 @@ class Router:
                         self.deliver_data(message, srcif)
                     case "dump":
                         self.dump_table(message)
+                    case _:
+                        print(f"Unknown message type {message['type']}")
 
 
     def route_update(self, msg):
@@ -66,6 +68,10 @@ class Router:
         self.history.append(msg)
 
         # create new route entry, update forwarding table
+        self.create_entry(msg)
+        self.propagate_update(msg)
+
+    def create_entry(self, msg):
         new_route = {
             "network": msg["msg"]["network"],
             "netmask": msg["msg"]["netmask"],
@@ -76,21 +82,9 @@ class Router:
             "selfOrigin": msg["msg"]["selfOrigin"],
         }
         self.routing_table.insert(new_route)
-        self.propagate_update(msg)
 
     def propagate_update(self, msg):
-        peer_ip = msg["src"]
-        relation = self.relations[peer_ip]
-
-        # Update received from a customer: send updates to all other neighbors
-        if relation == "cust":
-            forward = [ip for ip in self.relations if ip != peer_ip]
-        # Update received from a peer or a provider: only send updates to your customers
-        elif relation == "peer" or relation == "prov":
-            forward = [ip for ip, rel in self.relations.items() if rel == "cust"]
-        else:
-            forward = []
-
+        forward = self.neighbors_to_send(msg)
         for dest in forward:
             as_path = [self.asn] + msg["msg"]["ASPath"]
             sending = {
@@ -107,7 +101,54 @@ class Router:
 
 
     def route_withdraw(self, msg):
-        pass
+        """
+        Handles withdraw message from a neighbor router, rebuilds the forwarding table,
+        and propagates the withdrawal to neighbors.
+        :param msg: a JSON object.
+        """
+        def in_withdrawn(update_msg):
+            ip = update_msg["msg"]["network"]
+            mask = update_msg["msg"]["netmask"]
+            return (ip, mask) in withdrawn and update_msg["src"] == source
+
+        source = msg["src"]
+        withdrawn = set()
+        for route in msg["msg"]:
+            withdrawn.add((route["network"], route["netmask"]))
+        self.history = [m for m in self.history if not in_withdrawn(m)]
+
+        # rebuild forwarding table
+        self.routing_table = Trie()
+        for update in self.history:
+            self.create_entry(update)
+
+        # propagate the withdrawal
+        self.propagate_withdraw(msg)
+
+    def propagate_withdraw(self, msg):
+        forward = self.neighbors_to_send(msg)
+        for dest in forward:
+            sending = {
+                "src": self.our_addr(dest),
+                "dst": dest,
+                "type": "withdraw",
+                "msg": msg["msg"][:]
+            }
+            self.send(dest, json.dumps(sending))
+
+    def neighbors_to_send(self, msg):
+        peer_ip = msg["src"]
+        relation = self.relations[peer_ip]
+
+        # Update received from a customer: send updates to all other neighbors
+        if relation == "cust":
+            forward = [ip for ip in self.relations if ip != peer_ip]
+        # Update received from a peer or a provider: only send updates to your customers
+        elif relation == "peer" or relation == "prov":
+            forward = [ip for ip, rel in self.relations.items() if rel == "cust"]
+        else:
+            forward = []
+        return forward
 
 
     def deliver_data(self, msg, srcif):
