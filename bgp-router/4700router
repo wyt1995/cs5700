@@ -46,14 +46,13 @@ class Router:
                 print("Received message '%s' from %s" % (msg, srcif))
 
                 message = json.loads(msg)
-                msg_type = message["type"]
-                match msg_type:
+                match message["type"]:
                     case "update":
                         self.route_update(message)
                     case "withdraw":
                         self.route_withdraw(message)
                     case "data":
-                        self.deliver_data(message)
+                        self.deliver_data(message, srcif)
                     case "dump":
                         self.dump_table(message)
 
@@ -111,17 +110,17 @@ class Router:
         pass
 
 
-    def deliver_data(self, msg):
+    def deliver_data(self, msg, srcif):
         dest_ip = msg["dst"]
         route = self.routing_table.search(dest_ip)
-        if not route:
+        if not route or not self.check_relation(srcif, route["peer"]):
             sending = {
                 "src": self.our_addr(dest_ip),
                 "dst": msg["src"],
                 "type": "no route",
                 "msg": {}
             }
-            self.send(msg["src"], json.dumps(sending))
+            self.send(srcif, json.dumps(sending))
         else:
             sending = {
                 "src": self.our_addr(dest_ip),
@@ -141,6 +140,12 @@ class Router:
             "msg": curr_table,
         }
         self.send(msg["src"], json.dumps(sending))
+
+
+    def check_relation(self, src_ip, dest_ip):
+        src_relation = self.relations[src_ip]
+        dst_relation = self.relations[dest_ip]
+        return src_relation == "cust" or dst_relation == "cust"
 
 
 if __name__ == "__main__":
