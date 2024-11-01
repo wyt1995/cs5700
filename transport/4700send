@@ -50,7 +50,7 @@ class Sender:
             # self.log("Received message %s" % data)
             return json.loads(data.decode("utf-8"))
         except json.JSONDecodeError:
-            self.log("Received corrupt message: JSON decode error")
+            self.log("Received corrupt packet: JSON decode error")
             return None
 
     @staticmethod
