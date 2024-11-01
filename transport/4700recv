@@ -13,9 +13,9 @@ class Receiver:
         self.remote_host = None
         self.remote_port = None
 
-        self.packet_pq = []   # use a heap to store out-of-order packets
-        self.next_seq = 0
-        self.received = set()
+        self.packet_pq = []    # use a heap to store out-of-order packets
+        self.next_seq = 0      # the expected sequence number to be received
+        self.received = set()  # keep track of received sequence numbers to detect duplicates
 
     def send(self, message):
         # self.log("Sent message %s" % json.dumps(message))
@@ -42,26 +42,41 @@ class Receiver:
         sys.stderr.flush()
 
     @staticmethod
-    def verify_checksum(msg):
-        sender = msg["checksum"]
-        received = hashlib.md5(msg["data"].encode()).hexdigest()
-        return sender == received
+    def checksum(data):
+        return hashlib.md5(data.encode()).hexdigest()
+
+    def verify_checksum(self, msg):
+        """
+        Verify the checksum field of the received message.
+        :param msg: the received message.
+        :return: True if checksum matches the data, False otherwise.
+        """
+        sent = msg["checksum"]
+        received = self.checksum(msg["data"])
+        return sent == received
+
+    def send_ack(self, sequence):
+        """
+        Send an acknowledgement message back to the sender.
+        :param sequence: the sequence number to be acknowledged.
+        """
+        ack = {"type": "ack", "seq": sequence}
+        hashcode = self.checksum(json.dumps(ack))
+        ack["checksum"] = hashcode
+        self.send(ack)
 
     def handle_receive(self, msg):
+        # ignore duplicated packets
         seq = msg["seq"]
         if seq in self.received:
             return
         self.received.add(seq)
 
-        # verify checksum
-        if not self.verify_checksum(msg):
-            self.log(f"packet with sequence number {seq} is corrupted")
-            return
-
-        # packet is received in order, print out data to stdout
+        # packet is received in-order, print out data to stdout
         if seq == self.next_seq:
             print(msg["data"], end='', flush=True)
             self.next_seq += 1
+        # received out-of-order, add to the priority queue for future process
         else:
             heapq.heappush(self.packet_pq, (seq, msg))
 
@@ -77,8 +92,13 @@ class Receiver:
             for conn in socks:
                 msg = self.recv(conn)
                 if msg and msg["type"] == "msg":
-                    # Always send back an ACK
-                    self.send({ "type": "ack", "seq": msg["seq"] })
+                    # verify checksum for error detection
+                    if not self.verify_checksum(msg):
+                        self.log(f"Corrupt packet {msg['seq']}")
+                        continue
+
+                    # send back an ACK if the packet is correct
+                    self.send_ack(msg["seq"])
 
                     self.handle_receive(msg)
                     self.process_heap()

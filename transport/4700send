@@ -46,9 +46,12 @@ class Sender:
         if addr != (self.remote_host, self.remote_port):
             self.log("Error: Received response from unexpected remote; ignoring")
             return None
-        else:
+        try:
             # self.log("Received message %s" % data)
             return json.loads(data.decode("utf-8"))
+        except json.JSONDecodeError:
+            self.log("Received corrupt message: JSON decode error")
+            return None
 
     @staticmethod
     def checksum(data):
@@ -56,6 +59,11 @@ class Sender:
         Compute a hash value to check for data corruption.
         """
         return hashlib.md5(data.encode()).hexdigest()
+
+    def verify_checksum(self, msg):
+        send_hash = msg["checksum"]
+        computed = self.checksum(json.dumps({k: v for k, v in msg.items() if k != "checksum"}))
+        return send_hash == computed
 
     def send_packet(self, data):
         """
@@ -76,7 +84,7 @@ class Sender:
         Remove the packet that has been acknowledged.
         :param msg: the JSON packet received from the socket connection.
         """
-        if not msg:
+        if not msg or not self.verify_checksum(msg):
             return
         sequence = msg["seq"]
         if sequence not in self.outstanding:
