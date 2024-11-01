@@ -44,7 +44,7 @@ class Sender:
 
         # Make sure we're talking to the same remote host
         if addr != (self.remote_host, self.remote_port):
-            self.log("Error:  Received response from unexpected remote; ignoring")
+            self.log("Error: Received response from unexpected remote; ignoring")
             return None
         else:
             # self.log("Received message %s" % data)
@@ -106,14 +106,15 @@ class Sender:
                     if len(self.outstanding) < self.window:
                         self.waiting = False
                 elif conn == sys.stdin and not end_file:
+                    if len(self.outstanding) >= self.window:
+                        self.waiting = True
+                        continue
                     data = sys.stdin.read(DATA_SIZE)
                     if len(data) == 0:
                         self.log("All sent, waiting for ACKs")
                         end_file = True
-                    elif len(self.outstanding) < self.window:
-                        self.send_packet(data)
                     else:
-                        self.waiting = True
+                        self.send_packet(data)
             self.retransmit()
             if end_file and len(self.outstanding) == 0:
                 self.log("All done!")
