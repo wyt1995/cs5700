@@ -1,6 +1,7 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
+import hashlib, heapq
 
 class Receiver:
     def __init__(self):
@@ -12,8 +13,12 @@ class Receiver:
         self.remote_host = None
         self.remote_port = None
 
+        self.packet_pq = []   # use a heap to store out-of-order packets
+        self.next_seq = 0
+        self.received = set()
+
     def send(self, message):
-        self.log("Sent message %s" % json.dumps(message))
+        # self.log("Sent message %s" % json.dumps(message))
         self.socket.sendto(json.dumps(message).encode("utf-8"), (self.remote_host, self.remote_port))
 
     def recv(self, socket):
@@ -26,32 +31,61 @@ class Receiver:
 
         # Make sure we're talking to the same remote host
         if addr != (self.remote_host, self.remote_port):
-            self.log("Error:  Received response from unexpected remote; ignoring")
+            self.log("Error: Received response from unexpected remote; ignoring")
             return None
         else:
-            self.log("Received message %s" % data.decode("utf-8"))
+            # self.log("Received message %s" % data.decode("utf-8"))
             return json.loads(data.decode("utf-8"))
 
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
+    @staticmethod
+    def verify_checksum(msg):
+        sender = msg["checksum"]
+        received = hashlib.md5(msg["data"].encode()).hexdigest()
+        return sender == received
+
+    def handle_receive(self, msg):
+        seq = msg["seq"]
+        if seq in self.received:
+            return
+        self.received.add(seq)
+
+        # verify checksum
+        if not self.verify_checksum(msg):
+            self.log(f"packet with sequence number {seq} is corrupted")
+            return
+
+        # packet is received in order, print out data to stdout
+        if seq == self.next_seq:
+            print(msg["data"], end='', flush=True)
+            self.next_seq += 1
+        else:
+            heapq.heappush(self.packet_pq, (seq, msg))
+
+    def process_heap(self):
+        while self.packet_pq and self.next_seq == self.packet_pq[0][0]:
+            _, packet = heapq.heappop(self.packet_pq)
+            print(packet["data"], end='', flush=True)
+            self.next_seq += 1
+
     def run(self):
         while True:
             socks = select.select([self.socket], [], [])[0]
             for conn in socks:
                 msg = self.recv(conn)
-
-                if msg:
-                    # Print out the data to stdout
-                    print(msg["data"], end='', flush=True)
-
-                    # Always send back an ack
+                if msg and msg["type"] == "msg":
+                    # Always send back an ACK
                     self.send({ "type": "ack", "seq": msg["seq"] })
+
+                    self.handle_receive(msg)
+                    self.process_heap()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='receive data')
     args = parser.parse_args()
-    sender = Receiver()
-    sender.run()
+    receiver = Receiver()
+    receiver.run()
