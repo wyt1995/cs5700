@@ -1,8 +1,6 @@
 # Wordle Project
 
-Author: Yutong Wang
-
-Northeastern username: wang.yutong5 
+This project implements a client program that plays a variant of the Wordle game. The client and the server exchanges information in JSON objects. Once the client correctly guesses the word, the server will return a secret flag.
 
 Note: I am a CS align student in the second year. I only know C previously but try to teach myself some C++ programming in this course. 
 Please let me know if you notice any incorrect or unconventional syntax in my code.
