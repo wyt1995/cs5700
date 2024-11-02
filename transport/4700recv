@@ -51,8 +51,8 @@ class Receiver:
         :param msg: the received message.
         :return: True if checksum matches the data, False otherwise.
         """
-        sent = msg["checksum"]
-        received = self.checksum(msg["data"])
+        sent = msg.get("checksum", "")
+        received = self.checksum(msg.get("data", ""))
         return sent == received
 
     def send_ack(self, sequence):
@@ -94,7 +94,7 @@ class Receiver:
                 if msg and msg["type"] == "msg":
                     # verify checksum for error detection
                     if not self.verify_checksum(msg):
-                        self.log(f"Corrupt packet {msg['seq']}")
+                        self.log(f"Corrupt packet {msg.get('seq', '')}")
                         continue
 
                     # send back an ACK if the packet is correct
