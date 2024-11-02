@@ -4,7 +4,7 @@ import argparse, socket, time, json, select, struct, sys, math
 import hashlib
 
 DATA_SIZE = 1375
-TIMEOUT = 2
+RTT_FACTOR = 0.875
 
 class Sender:
     def __init__(self, host, port):
@@ -24,7 +24,10 @@ class Sender:
         self.outstanding = {}
 
         # congestion control
-        self.cwnd = 1
+        self.cwnd = 2
+        self.ssthresh = self.window
+        self.rtt = 1
+        self.timeout = self.rtt * 2
 
     def log(self, message):
         sys.stderr.write(message + "\n")
@@ -61,7 +64,7 @@ class Sender:
         return hashlib.md5(data.encode()).hexdigest()
 
     def verify_checksum(self, msg):
-        send_hash = msg["checksum"]
+        send_hash = msg.get("checksum", "")
         computed = self.checksum(json.dumps({k: v for k, v in msg.items() if k != "checksum"}))
         return send_hash == computed
 
@@ -89,6 +92,15 @@ class Sender:
         sequence = msg["seq"]
         if sequence not in self.outstanding:
             return
+        sample = time.time() - self.outstanding[sequence]["time"]
+        self.rtt = (RTT_FACTOR * self.rtt) + (1 - RTT_FACTOR) * sample
+        self.timeout = self.rtt * 2
+        # slow start
+        if self.cwnd < self.ssthresh:
+            self.cwnd *= 2
+        # congestion avoidance
+        else:
+            self.cwnd += 2
         del self.outstanding[sequence]
 
     def retransmit(self):
@@ -97,10 +109,12 @@ class Sender:
         """
         for seq, packet in self.outstanding.items():
             elapsed = time.time() - packet["time"]
-            if elapsed > TIMEOUT:
+            if elapsed > self.timeout:
                 msg = {"type": "msg", "seq": seq, "checksum": packet["checksum"], "data": packet["data"]}
                 self.send(msg)
                 packet["time"] = time.time()
+                self.cwnd = self.cwnd // 2
+                self.ssthresh = self.cwnd
 
     def run(self):
         end_file = False
@@ -111,10 +125,10 @@ class Sender:
                 if conn == self.socket:
                     msg = self.recv(conn)
                     self.recv_ack(msg)
-                    if len(self.outstanding) < self.window:
+                    if len(self.outstanding) < self.cwnd:
                         self.waiting = False
                 elif conn == sys.stdin and not end_file:
-                    if len(self.outstanding) >= self.window:
+                    if len(self.outstanding) >= self.cwnd:
                         self.waiting = True
                         continue
                     data = sys.stdin.read(DATA_SIZE)
