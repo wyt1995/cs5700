@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+# ./crawler wang.yutong5 1b7d3438ff3120ba316d98de9b382423155e521a52b56ecf195df4d738364b62
+
+import argparse
+import socket
+import ssl
+
+DEFAULT_SERVER = "fakebook.khoury.northeastern.edu"
+DEFAULT_PORT = 443
+LOGIN_URI = "/accounts/login/?next=/fakebook/"
+ROOT_URL = f"https://{DEFAULT_SERVER}:{DEFAULT_PORT}/fakebook/"
+LOGIN_URL = f"https://{DEFAULT_SERVER}:{DEFAULT_PORT}{LOGIN_URI}"
+
+class Crawler:
+    def __init__(self, args):
+        self.server = args.server
+        self.port = args.port
+        self.username = args.username
+        self.password = args.password
+        self.cookies = []
+
+    def login(self, sock):
+        request = f"GET {LOGIN_URI} HTTP/1.1\r\n" \
+                  f"Host: {self.server}:{self.port}\r\n" \
+                   "Connection: keep-alive\r\n\r\n"
+        sock.send(request.encode('ascii'))
+        data = sock.recv(1000)
+        print("Response:\n%s" % data.decode('ascii'))
+
+    def run(self):
+        context = ssl.create_default_context()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.connect((self.server, self.port))
+            with context.wrap_socket(sock, server_hostname=self.server) as ssl_sock:
+                self.login(ssl_sock)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='crawl Fakebook')
+    parser.add_argument('-s', dest="server", type=str, default=DEFAULT_SERVER, help="The server to crawl")
+    parser.add_argument('-p', dest="port", type=int, default=DEFAULT_PORT, help="The port to use")
+    parser.add_argument('username', type=str, help="The username to use")
+    parser.add_argument('password', type=str, help="The password to use")
+    args = parser.parse_args()
+    sender = Crawler(args)
+    sender.run()
