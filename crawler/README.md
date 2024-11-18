@@ -22,5 +22,5 @@ Testing the web crawler mainly relied on using print statements to display all H
 Once the crawler found all five flags, I refactored the error handling code to enhance reliability.
 
 ## Reference
-Python 3.13 official documentations in [TLS/SSL](https://docs.python.org/3/library/ssl.html) 
+Python 3.13 official documentation in [TLS/SSL](https://docs.python.org/3/library/ssl.html) 
 and [HTML Parser](https://docs.python.org/3/library/html.parser.html).
