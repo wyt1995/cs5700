@@ -2,8 +2,11 @@
 # ./crawler wang.yutong5 1b7d3438ff3120ba316d98de9b382423155e521a52b56ecf195df4d738364b62
 
 import argparse
+import collections
 import socket
 import ssl
+import urllib.parse
+from MyHTMLParser import MyHTMLParser
 
 DEFAULT_SERVER = "fakebook.khoury.northeastern.edu"
 DEFAULT_PORT = 443
@@ -11,28 +14,141 @@ LOGIN_URI = "/accounts/login/?next=/fakebook/"
 ROOT_URL = f"https://{DEFAULT_SERVER}:{DEFAULT_PORT}/fakebook/"
 LOGIN_URL = f"https://{DEFAULT_SERVER}:{DEFAULT_PORT}{LOGIN_URI}"
 
+HTTP_OK = 200
+FOUND = 302
+FORBIDDEN = 403
+NOT_FOUND = 404
+UNAVAILABLE = 503
+
 class Crawler:
     def __init__(self, args):
         self.server = args.server
         self.port = args.port
         self.username = args.username
         self.password = args.password
+        self.sock = None
+        self.parser = MyHTMLParser()
+        self.secret = set()
+        self.visited = set()
+        self.frontier = collections.deque()
         self.cookies = []
 
-    def login(self, sock):
-        request = f"GET {LOGIN_URI} HTTP/1.1\r\n" \
-                  f"Host: {self.server}:{self.port}\r\n" \
-                   "Connection: keep-alive\r\n\r\n"
-        sock.send(request.encode('ascii'))
-        data = sock.recv(1000)
-        print("Response:\n%s" % data.decode('ascii'))
+    def recv_webpage(self):
+        """
+        Receive an HTTP response from the connected socket,
+        and feed the webpage to the HTML parser if okay.
+        :return: the status code of the HTTP response.
+        """
+        response = b""
+        delimiter = b"\r\n\r\n"
+        while delimiter not in response:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+        header, _, body = response.partition(delimiter)
+        status_code, content_length = 0, 0
+        redirect_url = None
+        for line in header.decode().split("\r\n"):
+            if line.startswith("HTTP"):
+                status_code = int(line.split()[1].strip())
+            elif line.startswith("content-length"):
+                content_length = int(line.split(": ")[1].strip())
+            elif line.startswith("set-cookie"):
+                cookie_data = line.split(": ")[1].strip()
+                self.cookies.append(cookie_data.split(";")[0])
+            elif line.startswith("location"):
+                redirect_url = line.split(": ")[1].strip()
+        # HTTP response body
+        while len(body) < content_length:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                break
+            body += chunk
+        if status_code == HTTP_OK:
+            self.parser.feed(body.decode().strip())
+        return status_code, redirect_url
+
+    def send_get(self, uri=LOGIN_URI):
+        """
+        Send a GET request to the server.
+        :param uri: the specific location of the resource to request.
+        """
+        request = (
+            f"GET {uri} HTTP/1.1\r\n"
+            f"Host: {self.server}:{self.port}\r\n"
+            f"Cookie: {'; '.join(self.cookies)}\r\n"
+            "Connection: keep-alive\r\n\r\n"
+        )
+        self.sock.send(request.encode("ascii"))
+
+    def send_post(self):
+        """
+        Send a POST request to the server. Used to log into the website.
+        """
+        form = {
+            "username": self.username,
+            "password": self.password,
+            "csrfmiddlewaretoken": self.parser.csrf_token,
+        }
+        form = urllib.parse.urlencode(form)
+        request = (
+            f"POST {LOGIN_URI} HTTP/1.1\r\n"
+            f"Host: {self.server}:{self.port}\r\n"
+            f"Accept: */*\r\n"
+            f"Connection: keep-alive\r\n"
+            f"Cookie: {self.cookies[0]};\r\n"
+            f"Content-Type: application/x-www-form-urlencoded\r\n"
+            f"Content-Length: {len(form)}\r\n\r\n"
+            f"{form}\r\n"
+        )
+        self.sock.send(request.encode("ascii"))
+
+    def login(self):
+        """
+        Log in to the server. If successful, add the first redirected URL to the frontier.
+        """
+        self.send_get()
+        status, _ = self.recv_webpage()
+        if status == HTTP_OK:
+            self.send_post()
+            status, redirect = self.recv_webpage()
+            if status == FOUND:
+                self.frontier.append(redirect)
+        else:
+            print("Login failed")
+            exit(1)
+
+    def bfs_crawl(self):
+        """
+        Traverse the website using breadth-first search.
+        Terminate when all five secret flags are found.
+        """
+        while self.frontier:
+            curr = self.frontier.popleft()
+            if curr not in self.visited:
+                self.visited.add(curr)
+                self.send_get(curr)
+                status, redirect = self.recv_webpage()
+                if status == HTTP_OK:
+                    self.frontier.extend(self.parser.links)
+                    self.secret.update(self.parser.flags)
+                    self.parser.clear()
+                elif status == FOUND:
+                    self.frontier.append(redirect)
+            if len(self.secret) >= 5:
+                break
 
     def run(self):
         context = ssl.create_default_context()
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.connect((self.server, self.port))
             with context.wrap_socket(sock, server_hostname=self.server) as ssl_sock:
-                self.login(ssl_sock)
+                self.sock = ssl_sock
+                self.login()
+                self.bfs_crawl()
+                for s in self.secret:
+                    print(s)
 
 
 if __name__ == "__main__":
