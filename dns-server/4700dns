@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
-from dnslib import DNSRecord, DNSHeader, RR, QTYPE, RCODE, DNSQuestion
+from dnslib import DNSRecord, DNSHeader, RR, QTYPE, RCODE
 from collections import defaultdict
 
 class Server:
@@ -55,36 +55,52 @@ class Server:
         return name.endswith(domain)
 
     def dns_resolver(self, request):
+        qname = request.q.qname
+        if self.in_authoritative_domain(qname):
+            response = self.local_resolver(request)
+        else:
+            response = self.recursive_resolver(request)
+        return response
+
+    def local_resolver(self, request):
         response = request.reply()
         qname = request.q.qname
         qtype = request.q.qtype
-        if self.in_authoritative_domain(qname):
-            rmatch = self.auth_matching(qname, qtype)
-            if rmatch:
-                for r in rmatch:
-                    response.add_answer(r)
-                    if r.rtype == QTYPE.CNAME:
-                        a_records = self.auth_matching(r.rdata.label, qtype)
-                        for a in a_records:
-                            response.add_answer(a)
-                    elif r.rtype == QTYPE.NS:
-                        a_records = self.auth_matching(r.rdata.label, QTYPE.A)
-                        for a in a_records:
-                            response.add_ar(a)
-            else:
-                response.header.rcode = RCODE.NXDOMAIN
+        rmatch = self.auth_matching(qname, qtype)
+        if rmatch:
+            for r in rmatch:
+                response.add_answer(r)
+                if r.rtype == QTYPE.CNAME:
+                    a_records = self.auth_matching(r.rdata.label, qtype)
+                    for a in a_records:
+                        response.add_answer(a)
+                elif r.rtype == QTYPE.NS:
+                    a_records = self.auth_matching(r.rdata.label, QTYPE.A)
+                    for a in a_records:
+                        response.add_ar(a)
         else:
-            response.header.aa = 0
-            answers = self.recursive_lookup(qname, qtype)
-            if answers:
-                for r in answers.rr:
-                    response.add_answer(r)
-                for a in answers.auth:
-                    response.add_answer(a)
-                for ar in answers.ar:
-                    response.add_ar(ar)
-            else:
-                response.header.rcode = RCODE.NXDOMAIN
+            response.header.rcode = RCODE.NXDOMAIN
+        return response
+
+    def recursive_resolver(self, request):
+        response = request.reply()
+        response.header.aa = 0
+        qname = request.q.qname
+        qtype = request.q.qtype
+        answer = self.recursive_lookup(qname, qtype)
+        if answer:
+            for r in answer.rr:
+                response.add_answer(r)
+                if r.rtype == QTYPE.CNAME:
+                    a_records = self.recursive_lookup(r.rdata.label, qtype)
+                    for a in a_records.rr:
+                        response.add_answer(a)
+            for au in answer.auth:
+                response.add_auth(au)
+            for ar in answer.ar:
+                response.add_ar(ar)
+        else:
+            response.header.rcode = RCODE.NXDOMAIN
         return response
 
     def auth_matching(self, qname, qtype):
@@ -96,9 +112,35 @@ class Server:
         pass
 
     def recursive_lookup(self, qname, qtype):
-        query = DNSRecord.question(qname, QTYPE[qtype])
-        reply = self.dns_sendrecv(self.root_ip, query)
-        return reply
+        current = [self.root_ip]
+        visited = set()
+        max_depth = 10
+        depth = 0
+        while depth < max_depth:
+            depth += 1
+            for ip in current:
+                if ip in visited:
+                    continue
+                visited.add(ip)
+
+                # send DNS query and check the response
+                query = DNSRecord.question(qname, QTYPE[qtype])
+                reply = self.dns_sendrecv(ip, query)
+                if not reply:
+                    continue
+                if reply.rr or (qtype == QTYPE.NS and reply.auth):
+                    return reply
+
+                # find ip address for the next nameserver in glue records
+                ns_records = reply.auth
+                glue_records = reply.ar
+                next_level = []
+                for ns in ns_records:
+                    for ar in glue_records:
+                        if ar.rname == ns.rdata.label and ar.rtype == QTYPE.A:
+                            next_level.append(str(ar.rdata))
+                current = next_level
+        return None
 
     def run(self):
         seq = 0
