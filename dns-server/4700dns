@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
-from dnslib import DNSRecord, DNSHeader, RR, QTYPE, RCODE
+from dnslib import DNSRecord, DNSHeader, RR, QTYPE, RCODE, DNSQuestion
 from collections import defaultdict
 
 class Server:
@@ -15,7 +15,6 @@ class Server:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(("0.0.0.0", port))
         self.port = self.socket.getsockname()[1]
-
         self.log("Bound to port %d" % self.port)
 
     def authoritative_zone(self):
@@ -34,40 +33,72 @@ class Server:
         sys.stderr.flush()
 
     def send(self, addr, message):
-        # self.log("Sending message:\n%s" % message)
         self.socket.sendto(message.pack(), addr)
 
     def recv(self, socket):
         data, addr = socket.recvfrom(65535)
         request = DNSRecord.parse(data)
-        # self.log("Received message:\n%s" % request)
-
         response = self.dns_resolver(request)
         self.send(addr, response)
+
+    def dns_sendrecv(self, ip, query):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(query.pack(), (ip, 60053))
+        data, _ = sock.recvfrom(65535)
+        reply = DNSRecord.parse(data)
+        sock.close()
+        return reply
+
+    def in_authoritative_domain(self, name):
+        name = str(name).rstrip(".")
+        domain = str(self.domain).rstrip(".")
+        return name.endswith(domain)
 
     def dns_resolver(self, request):
         response = request.reply()
         qname = request.q.qname
         qtype = request.q.qtype
-        rmatch = self.find_matching(qname, qtype)
-        if not rmatch:
-            response.header.rcode = RCODE.NXDOMAIN
-        for r in rmatch:
-            response.add_answer(r)
-            if r.rtype == QTYPE.CNAME:
-                a_records = self.find_matching(r.rdata.label, qtype)
-                for a in a_records:
+        if self.in_authoritative_domain(qname):
+            rmatch = self.auth_matching(qname, qtype)
+            if rmatch:
+                for r in rmatch:
+                    response.add_answer(r)
+                    if r.rtype == QTYPE.CNAME:
+                        a_records = self.auth_matching(r.rdata.label, qtype)
+                        for a in a_records:
+                            response.add_answer(a)
+                    elif r.rtype == QTYPE.NS:
+                        a_records = self.auth_matching(r.rdata.label, QTYPE.A)
+                        for a in a_records:
+                            response.add_ar(a)
+            else:
+                response.header.rcode = RCODE.NXDOMAIN
+        else:
+            response.header.aa = 0
+            answers = self.recursive_lookup(qname, qtype)
+            if answers:
+                for r in answers.rr:
+                    response.add_answer(r)
+                for a in answers.auth:
                     response.add_answer(a)
-            elif r.rtype == QTYPE.NS:
-                a_records = self.find_matching(r.rdata.label, QTYPE.A)
-                for a in a_records:
-                    response.add_ar(a)
+                for ar in answers.ar:
+                    response.add_ar(ar)
+            else:
+                response.header.rcode = RCODE.NXDOMAIN
         return response
 
-    def find_matching(self, qname, qtype):
+    def auth_matching(self, qname, qtype):
         if qname in self.local:
             return [r for r in self.local[qname] if r.rtype == qtype or r.rtype == QTYPE.CNAME]
         return []
+
+    def cache_search(self, qname, qtype):
+        pass
+
+    def recursive_lookup(self, qname, qtype):
+        query = DNSRecord.question(qname, QTYPE[qtype])
+        reply = self.dns_sendrecv(self.root_ip, query)
+        return reply
 
     def run(self):
         seq = 0
