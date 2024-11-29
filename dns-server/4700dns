@@ -1,12 +1,16 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
-from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A
+from dnslib import DNSRecord, DNSHeader, RR, QTYPE, RCODE
+from collections import defaultdict
 
 class Server:
-    def __init__(self, root_ip, domain, port):
+    def __init__(self, root_ip, zone_file, port):
         self.root_ip = root_ip
-        self.domain = domain
+        self.zone_file = zone_file
+        self.local = defaultdict(list)
+        self.cache = defaultdict(list)
+        self.domain = self.authoritative_zone()
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(("0.0.0.0", port))
@@ -14,27 +18,56 @@ class Server:
 
         self.log("Bound to port %d" % self.port)
 
+    def authoritative_zone(self):
+        domain = ""
+        with open(self.zone_file, "r") as file:
+            zone = file.read()
+        zone = RR.fromZone(zone)
+        for record in zone:
+            if record.rtype == QTYPE.SOA:
+                domain = record.rname
+            self.local[record.rname].append(record)
+        return domain
+
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
     def send(self, addr, message):
-        self.log("Sending message:\n%s" % message)
+        # self.log("Sending message:\n%s" % message)
         self.socket.sendto(message.pack(), addr)
 
     def recv(self, socket):
         data, addr = socket.recvfrom(65535)
-
-        # Unpack the DNS request
         request = DNSRecord.parse(data)
-        self.log("Received message:\n%s" % request)
+        # self.log("Received message:\n%s" % request)
 
-        # YOU WILL NEED TO ACTUALLY DO SOMETHING SMART HERE
-        # WE ARE JUST REPLYING WITH A FIXED RESPONSE
-        response = request.reply()
-        response.add_answer(RR("abc.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=60))       
-        
+        response = self.dns_resolver(request)
         self.send(addr, response)
+
+    def dns_resolver(self, request):
+        response = request.reply()
+        qname = request.q.qname
+        qtype = request.q.qtype
+        rmatch = self.find_matching(qname, qtype)
+        if not rmatch:
+            response.header.rcode = RCODE.NXDOMAIN
+        for r in rmatch:
+            response.add_answer(r)
+            if r.rtype == QTYPE.CNAME:
+                a_records = self.find_matching(r.rdata.label, qtype)
+                for a in a_records:
+                    response.add_answer(a)
+            elif r.rtype == QTYPE.NS:
+                a_records = self.find_matching(r.rdata.label, QTYPE.A)
+                for a in a_records:
+                    response.add_ar(a)
+        return response
+
+    def find_matching(self, qname, qtype):
+        if qname in self.local:
+            return [r for r in self.local[qname] if r.rtype == qtype or r.rtype == QTYPE.CNAME]
+        return []
 
     def run(self):
         seq = 0
