@@ -19,6 +19,10 @@ class Server:
         self.log("Bound to port %d" % self.port)
 
     def authoritative_zone(self):
+        """
+        Read from zone file, updating DNS mapping in the authoritative domain.
+        :return: the name of the authoritative domain.
+        """
         domain = ""
         with open(self.zone_file, "r") as file:
             zone = file.read()
@@ -51,6 +55,10 @@ class Server:
         self.send(addr, response)
 
     def dns_sendrecv(self, ip, query):
+        """
+        Send a DNS request to the given IP address, waiting for a response.
+        :return: the parsed response if okay, None on error.
+        """
         retries = 6
         for i in range(retries):
             sock = None
@@ -70,6 +78,9 @@ class Server:
         return None
 
     def in_authoritative_domain(self, name):
+        """
+        :return: true if the given name is in the authoritative domain, false otherwise.
+        """
         name = str(name).rstrip(".")
         domain = str(self.domain).rstrip(".")
         return name.endswith(domain)
@@ -88,6 +99,9 @@ class Server:
         return response
 
     def local_resolver(self, request):
+        """
+        Assuming the request is in the authoritative domain, build a corresponding response.
+        """
         response = request.reply()
         qname = request.q.qname
         qtype = request.q.qtype
@@ -108,6 +122,9 @@ class Server:
         return response
 
     def recursive_resolver(self, request):
+        """
+        Recursively resolve the given DNS request.
+        """
         response = request.reply()
         response.header.aa = 0
         qname = request.q.qname
@@ -129,11 +146,19 @@ class Server:
         return response
 
     def auth_matching(self, qname, qtype):
+        """
+        Find an appropriate matching in the authoritative domain for the given query.
+        :return: a list of answers if exists, empty list otherwise.
+        """
         if qname in self.local:
             return [r for r in self.local[qname] if r.rtype == qtype or r.rtype == QTYPE.CNAME]
         return []
 
     def cache_matching(self, qname, qtype, request):
+        """
+        Find an appropriate matching in the cache for the given query.
+        :return: a DNS record if the query is cached, None otherwise.
+        """
         self.cache_cleanup()
         key = (qname, qtype)
         with self.lock:
@@ -160,6 +185,9 @@ class Server:
             self.cache[key].extend(records)
 
     def cache_cleanup(self):
+        """
+        Discard any expired DNS records in the cache.
+        """
         t = time.time()
         with self.lock:
             to_delete = []
@@ -171,6 +199,10 @@ class Server:
                 del self.cache[key]
 
     def recursive_lookup(self, qname, qtype):
+        """
+        Recursively lookup the given DNS request.
+        The maximum recursion depth is set to 10.
+        """
         current = [self.root_ip]
         visited = set()
         max_depth = 10
@@ -202,6 +234,9 @@ class Server:
         return None
 
     def bailiwick_filter(self, request, response):
+        """
+        Filter out any records that are outside the responding server’s bailiwick.
+        """
         def checker(record):
             if record.rtype == QTYPE.CNAME or record.rtype == QTYPE.NS:
                 allowed.append(str(record.rdata.label).rstrip("."))
