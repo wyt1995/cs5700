@@ -1,6 +1,6 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse, socket, time, json, select, struct, sys, threading
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, RCODE
 from collections import defaultdict
 
@@ -11,6 +11,7 @@ class Server:
         self.local = defaultdict(list)
         self.cache = defaultdict(list)
         self.domain = self.authoritative_zone()
+        self.lock = threading.Lock()
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(("0.0.0.0", port))
@@ -37,17 +38,36 @@ class Server:
 
     def recv(self, socket):
         data, addr = socket.recvfrom(65535)
+        threading.Thread(target=self.handle_request, args=(data, addr)).start()
+
+    def handle_request(self, data, addr):
         request = DNSRecord.parse(data)
         response = self.dns_resolver(request)
+        if not response:
+            response = request.reply()
+            response.header.rcode = RCODE.SERVFAIL
+        else:
+            self.bailiwick_filter(request, response)
         self.send(addr, response)
 
     def dns_sendrecv(self, ip, query):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(query.pack(), (ip, 60053))
-        data, _ = sock.recvfrom(65535)
-        reply = DNSRecord.parse(data)
-        sock.close()
-        return reply
+        retries = 6
+        for i in range(retries):
+            sock = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(1)
+                sock.sendto(query.pack(), (ip, 60053))
+                data, _ = sock.recvfrom(65535)
+                reply = DNSRecord.parse(data)
+                return reply
+            except (socket.timeout, socket.error) as e:
+                self.log(f"Error on attempt {i + 1}: {e}")
+                time.sleep(1)
+            finally:
+                if sock:
+                    sock.close()
+        return None
 
     def in_authoritative_domain(self, name):
         name = str(name).rstrip(".")
@@ -56,10 +76,15 @@ class Server:
 
     def dns_resolver(self, request):
         qname = request.q.qname
+        qtype = request.q.qtype
         if self.in_authoritative_domain(qname):
             response = self.local_resolver(request)
         else:
-            response = self.recursive_resolver(request)
+            response = self.cache_matching(qname, qtype, request)
+            if not response:
+                response = self.recursive_resolver(request)
+                if response and response.header.rcode == RCODE.NOERROR:
+                    self.cache_result(qname, qtype, response)
         return response
 
     def local_resolver(self, request):
@@ -100,7 +125,7 @@ class Server:
             for ar in answer.ar:
                 response.add_ar(ar)
         else:
-            response.header.rcode = RCODE.NXDOMAIN
+            response.header.rcode = RCODE.NOERROR
         return response
 
     def auth_matching(self, qname, qtype):
@@ -108,8 +133,42 @@ class Server:
             return [r for r in self.local[qname] if r.rtype == qtype or r.rtype == QTYPE.CNAME]
         return []
 
-    def cache_search(self, qname, qtype):
-        pass
+    def cache_matching(self, qname, qtype, request):
+        self.cache_cleanup()
+        key = (qname, qtype)
+        with self.lock:
+            records = self.cache[key]
+            if records:
+                response = request.reply()
+                response.header.aa = 0
+                for r, expires in records:
+                    if r.rtype == qtype or r.rtype == QTYPE.CNAME:
+                        response.add_answer(r)
+                    elif r.rtype == QTYPE.NS:
+                        response.add_auth(r)
+                    else:
+                        response.add_ar(r)
+                    r.ttl = int(expires - time.time())
+                return response
+        return None
+
+    def cache_result(self, qname, qtype, response):
+        key = (qname, qtype)
+        with self.lock:
+            t = time.time()
+            records = [(r, t + r.ttl) for r in response.rr + response.auth + response.ar]
+            self.cache[key].extend(records)
+
+    def cache_cleanup(self):
+        t = time.time()
+        with self.lock:
+            to_delete = []
+            for key in self.cache:
+                self.cache[key] = [(r, exp) for r, exp in self.cache[key] if exp > t]
+                if not self.cache[key]:
+                    to_delete.append(key)
+            for key in to_delete:
+                del self.cache[key]
 
     def recursive_lookup(self, qname, qtype):
         current = [self.root_ip]
@@ -142,8 +201,19 @@ class Server:
                 current = next_level
         return None
 
+    def bailiwick_filter(self, request, response):
+        def checker(record):
+            if record.rtype == QTYPE.CNAME or record.rtype == QTYPE.NS:
+                allowed.append(str(record.rdata.label).rstrip("."))
+            result = str(record.rname).rstrip(".")
+            return any([result.endswith(r) for r in allowed])
+
+        allowed = [str(request.q.qname).rstrip(".")]
+        response.rr = [r for r in response.rr if checker(r)]
+        response.auth = [r for r in response.auth if checker(r)]
+        response.ar = [r for r in response.ar if checker(r)]
+
     def run(self):
-        seq = 0
         while True:
             socks = select.select([self.socket], [], [], 0.1)[0]
             for conn in socks:
