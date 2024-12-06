@@ -360,7 +360,7 @@ class Client:
             self.log("Got response from %s:\n%s" % (addr, response))
 
         if not response.header.id in self.requests.keys():
-            self.log("Received unexpected response with id %; ignoring" % response.header.id)
+            self.log("Received unexpected response with id %d; ignoring" % response.header.id)
             return
 
         self.requests[response.header.id].received_response(response, reference=(addr == (REFERENCE_SERVER_IP, REFERENCE_SERVER_PORT)))
